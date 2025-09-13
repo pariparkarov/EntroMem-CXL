@@ -16,7 +16,7 @@ constexpr int D = 5;           // Depth of Count-Min Sketch
 constexpr int W = 272;         // Width per row
 constexpr int COUNTER_BITS = 10;
 constexpr uint16_t MAX_COUNTER = (1 << COUNTER_BITS) - 1;
-constexpr double EMA_ALPHA = 0.8;  // Decay rate for EMA
+constexpr double EMA_ALPHA = 0.6;  // Decay rate for EMA
 
 // Hash function with seeding
 uint64_t hash_page(uint64_t page, int seed) {
@@ -133,27 +133,27 @@ void print_ema_scores() {
 }
 
 // === Hotness Calculation ===
+uint64_t DR = 0;
+uint64_t pa = 4096;
 
 
-void update_hotness_metrics_in_table(PageTable& table) {
-    for (const auto& [page_id, _] : ema_hotness_scores) {
-        // Check if page exists in table, if not, set hotness to 0
-      const auto& internal_table = table.get_table();
-        if (internal_table.find(page_id) == internal_table.end()) {
-            // Page doesn't exist, set all metrics to 0
-            try {
-                table.set_metric(page_id, 0, 0.0f);  // Set hotness to 0
-                table.set_metric(page_id, 1, 0.0f);  // Access score to 0
-                table.set_metric(page_id, 2, 0.0f);  // Write score to 0
-                table.set_metric(page_id, 3, 0.0f);  // Reuse score to 0
-                table.set_metric(page_id, 4, 0.0f);  // EMA score to 0
-            } catch (const std::exception& e) {
-                std::cerr << "Failed to initialize metrics for new page " << page_id << ": " << e.what() << "\n";
-            }
-            continue;
+void update_hotness_metrics(GlobalPageManager& manager) {
+    for (const auto& [page_id, score] : ema_hotness_scores) {
+        // CRITICAL FIX: Convert page_id to global page number if needed
+        uint64_t global_page_num;
+        
+        try {
+            // If page_id is a physical page ID, convert to address first
+            uint64_t addr = page_id * pa + DR; // Assume DRAM_START as base
+            
+            // Then convert address to global page number
+            global_page_num = manager.address_to_page_number(addr);
+        } catch (...) {
+            // If conversion fails, assume page_id is already a global page number
+            global_page_num = page_id;
         }
         
-        // Calculate all components for existing pages
+        // Calculate all components
         double access_score = static_cast<double>(cms_estimate(page_id)) / MAX_COUNTER;
         double write_score = static_cast<double>(page_write_counts[page_id]) / MAX_COUNTER;
         int reuse_distance = reuse_distance_map.count(page_id) ? reuse_distance_map[page_id] : -1;
@@ -163,17 +163,25 @@ void update_hotness_metrics_in_table(PageTable& table) {
         // Weighted combination
         double hotness = 0.4 * access_score + 0.2 * write_score + 0.2 * reuse_score + 0.2 * ema_score;
         
+        // Clamp hotness to valid range
+        hotness = std::max(0.0, std::min(1.0, hotness));
+        
         try {
-            // Store different metrics at different indices
-            table.set_metric(page_id, 0, static_cast<float>(hotness));        // Hotness
-            table.set_metric(page_id, 1, static_cast<float>(access_score));   // Access score
-            table.set_metric(page_id, 2, static_cast<float>(write_score));    // Write score
-            table.set_metric(page_id, 3, static_cast<float>(reuse_score));    // Reuse score
-            table.set_metric(page_id, 4, static_cast<float>(ema_score));      // EMA score
+            // Use global_page_num instead of page_id
+            manager.set_metric(global_page_num, 0, static_cast<float>(hotness));        // Hotness
+            manager.set_metric(global_page_num, 1, static_cast<float>(access_score));   // Access score
+            manager.set_metric(global_page_num, 2, static_cast<float>(write_score));    // Write score
+            manager.set_metric(global_page_num, 3, static_cast<float>(reuse_score));    // Reuse score
+            manager.set_metric(global_page_num, 4, static_cast<float>(ema_score));      // EMA score
+            
+            // Debug output for verification
+            if (global_page_num != page_id) {
+
+            }
         } catch (const std::exception& e) {
-            std::cerr << "Failed to write metrics for page " << page_id << ": " << e.what() << "\n";
+            std::cerr << "Failed to write metrics for global page " << global_page_num 
+                     << " (original page_id " << page_id << "): " << e.what() << "\n";
         }
     }
 }
-
 #endif
